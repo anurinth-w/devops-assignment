@@ -1,10 +1,14 @@
-# app.py
 import os, uuid, time, json
 from flask import Flask, request, jsonify
 import boto3
 from botocore.exceptions import ClientError
+from prometheus_flask_exporter import PrometheusMetrics
 
 app = Flask(__name__)
+metrics = PrometheusMetrics(app)
+
+# static info metric
+metrics.info("app_info", "API Service Info", version="1.0.0")
 
 API_KEY = os.getenv("OCR_API_KEY", "")
 S3_BUCKET = os.getenv("OCR_S3_BUCKET")
@@ -20,7 +24,6 @@ ddb = session.client("dynamodb")
 def now_ms(): return int(time.time() * 1000)
 
 def require_api_key(req):
-    # ถ้าไม่ได้ตั้ง API_KEY ให้ปิดระบบไปเลย
     if not API_KEY:
         return False
     return req.headers.get("x-api-key", "") == API_KEY
@@ -58,13 +61,11 @@ def create_job():
     result_key = f"results/{job_id}/result.json"
     ts = now_ms()
 
-    # 1) upload to S3
     try:
         s3.upload_fileobj(f, S3_BUCKET, input_key)
     except ClientError as e:
         return jsonify({"error": "s3 upload failed", "detail": str(e)}), 500
 
-    # 2) put DynamoDB (QUEUED)
     try:
         ddb.put_item(
             TableName=DDB_TABLE,
@@ -81,19 +82,16 @@ def create_job():
             ConditionExpression="attribute_not_exists(job_id)"
         )
     except ClientError as e:
-        # cleanup: ลบไฟล์ที่อัปขึ้น S3 ไปแล้ว
         try:
             s3.delete_object(Bucket=S3_BUCKET, Key=input_key)
         except Exception:
             pass
         return jsonify({"error": "ddb put failed", "detail": str(e)}), 500
 
-    # 3) send SQS
     msg = {"job_id": job_id, "bucket": S3_BUCKET, "input_key": input_key, "result_key": result_key, "created_at": ts}
     try:
         sqs.send_message(QueueUrl=SQS_URL, MessageBody=json.dumps(msg))
     except ClientError as e:
-        # mark FAILED เพราะไม่เข้าคิว
         ddb.update_item(
             TableName=DDB_TABLE,
             Key={"job_id": {"S": job_id}},
@@ -137,9 +135,9 @@ def get_job(job_id):
     return jsonify(out), 200
 
 @app.get("/health")
+@metrics.do_not_track()
 def health():
     return jsonify({"ok": True}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
-

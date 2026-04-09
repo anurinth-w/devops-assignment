@@ -1,0 +1,31 @@
+groups:
+  - name: api_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: rate(flask_http_request_total{status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate detected"
+          description: "API error rate > 10% for 2 minutes"
+
+      - alert: APIDown
+        expr: up{job="api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API is down"
+          description: "API service is not responding"
+
+  - name: worker_alerts
+    rules:
+      - alert: WorkerCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total{container="worker"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker is crash looping"
+          description: "Worker pod has restarted multiple times"
