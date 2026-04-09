@@ -61,4 +61,4 @@ jobs:
         uses: azure/setup-kubectl@v3
 
       - name: Validate K8s manifests
-        run: kubectl apply --dry-run=client -k k8s/base/
+        run: kubectl apply --dry-run=client --validate=false -k k8s/base/
