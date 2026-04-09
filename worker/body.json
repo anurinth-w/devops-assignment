@@ -1,0 +1,336 @@
+import json
+import os
+import socket
+import time
+from pathlib import Path
+
+import boto3
+from botocore.exceptions import ClientError
+
+
+AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
+SQS_URL = os.getenv("OCR_SQS_URL")
+DDB_TABLE = os.getenv("OCR_DDB_TABLE")
+WORKER_ID = socket.gethostname()
+
+session = boto3.session.Session(region_name=AWS_REGION)
+s3 = session.client("s3")
+sqs = session.client("sqs")
+ddb = session.client("dynamodb")
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def attr_value(v):
+    if isinstance(v, str):
+        return {"S": v}
+    if isinstance(v, bool):
+        return {"BOOL": v}
+    if isinstance(v, int):
+        return {"N": str(v)}
+    if isinstance(v, float):
+        return {"N": str(v)}
+    return {"S": json.dumps(v, ensure_ascii=False)}
+
+
+def ddb_update_status(
+    job_id: str,
+    new_status: str,
+    *,
+    only_if_status: str | None = None,
+    set_fields: dict | None = None,
+    remove_fields: list[str] | None = None,
+):
+    set_fields = set_fields or {}
+    remove_fields = remove_fields or []
+
+    expr_parts = ["SET #s=:s, updated_at=:u, worker_id=:w"]
+    names = {"#s": "status"}
+    vals = {
+        ":s": {"S": new_status},
+        ":u": {"N": str(now_ms())},
+        ":w": {"S": WORKER_ID},
+    }
+
+    for k, v in set_fields.items():
+        if v is None:
+            continue
+        expr_parts.append(f"{k}=:{k}")
+        vals[f":{k}"] = attr_value(v)
+
+    update_expr = ", ".join(expr_parts)
+
+    if remove_fields:
+        update_expr += " REMOVE " + ", ".join(remove_fields)
+
+    kwargs = {
+        "TableName": DDB_TABLE,
+        "Key": {"job_id": {"S": job_id}},
+        "UpdateExpression": update_expr,
+        "ExpressionAttributeNames": names,
+        "ExpressionAttributeValues": vals,
+    }
+
+    if only_if_status is not None:
+        kwargs["ConditionExpression"] = "#s = :expected"
+        vals[":expected"] = {"S": only_if_status}
+
+    ddb.update_item(**kwargs)
+
+
+def s3_object_exists(bucket: str, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+
+
+def dummy_ocr(local_in_path: Path) -> dict:
+    """
+    Phase 1 dummy OCR.
+    ใช้ env OCR_TEST_MODE เพื่อทดสอบเคส:
+      - OCR_TEST_MODE=success
+      - OCR_TEST_MODE=permanent_404
+      - OCR_TEST_MODE=transient
+    """
+    test_mode = os.getenv("OCR_TEST_MODE", "success").strip().lower()
+
+    if test_mode == "permanent_404":
+        raise FileNotFoundError("simulated permanent input-not-found")
+    if test_mode == "transient":
+        raise TimeoutError("simulated transient timeout")
+
+    size = local_in_path.stat().st_size if local_in_path.exists() else 0
+    return {
+        "text": "dummy",
+        "pages": 1,
+        "input_size_bytes": size,
+    }
+
+
+def classify_error(exc: Exception) -> tuple[str, str]:
+    """
+    return (failure_type, error_code)
+    failure_type: TRANSIENT | PERMANENT
+    """
+    if isinstance(exc, FileNotFoundError):
+        return "PERMANENT", "INPUT_NOT_FOUND"
+
+    if isinstance(exc, TimeoutError):
+        return "TRANSIENT", "TIMEOUT"
+
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return "PERMANENT", "S3_NOT_FOUND"
+
+        if code in ("RequestTimeout", "SlowDown", "Throttling", "InternalError"):
+            return "TRANSIENT", code or "AWS_TRANSIENT"
+
+        if status and int(status) >= 500:
+            return "TRANSIENT", f"AWS_{status}"
+
+        return "TRANSIENT", code or "AWS_CLIENT_ERROR"
+
+    return "TRANSIENT", type(exc).__name__.upper()
+
+
+def get_receive_count(msg: dict) -> int:
+    attrs = msg.get("Attributes", {})
+    try:
+        return int(attrs.get("ApproximateReceiveCount", "1"))
+    except Exception:
+        return 1
+
+
+def main():
+    if not (SQS_URL and DDB_TABLE):
+        raise SystemExit("Missing env: OCR_SQS_URL and/or OCR_DDB_TABLE")
+
+    print(f"[worker] started worker_id={WORKER_ID} region={AWS_REGION}")
+
+    while True:
+        resp = sqs.receive_message(
+            QueueUrl=SQS_URL,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=20,
+            AttributeNames=["ApproximateReceiveCount"],
+        )
+
+        msgs = resp.get("Messages", [])
+        if not msgs:
+            continue
+
+        m = msgs[0]
+        receipt = m["ReceiptHandle"]
+        receive_count = get_receive_count(m)
+
+        body = json.loads(m["Body"])
+        job_id = body["job_id"]
+        bucket = body["bucket"]
+        input_key = body["input_key"]
+        result_key = body["result_key"]
+
+        # Idempotency: if result already exists, mark DONE and delete message
+        try:
+            if s3_object_exists(bucket, result_key):
+                print(f"[worker] job {job_id} result exists -> mark DONE + delete msg")
+                try:
+                    ddb_update_status(
+                        job_id,
+                        "DONE",
+                        set_fields={
+                            "last_worker_id": WORKER_ID,
+                        },
+                        remove_fields=[
+                            "failure_type",
+                            "error_code",
+                            "error_message",
+                            "last_receive_count",
+                            "failed_at",
+                        ],
+                    )
+                except Exception as e:
+                    print(f"[worker] warning: failed to update DONE on idempotency path: {e}")
+
+                sqs.delete_message(QueueUrl=SQS_URL, ReceiptHandle=receipt)
+                continue
+        except Exception as e:
+            print(f"[worker] head_object error for job {job_id}: {e}")
+
+        # Atomic claim: only QUEUED -> PROCESSING
+        try:
+            ddb_update_status(
+                job_id,
+                "PROCESSING",
+                only_if_status="QUEUED",
+                set_fields={
+                    "last_receive_count": receive_count,
+                    "last_worker_id": WORKER_ID,
+                },
+            )
+        except ClientError:
+            print(f"[worker] job {job_id} not QUEUED -> delete msg")
+            sqs.delete_message(QueueUrl=SQS_URL, ReceiptHandle=receipt)
+            continue
+
+        local_in = Path(f"/tmp/{job_id}.bin")
+        local_out = Path(f"/tmp/{job_id}.json")
+
+        try:
+            print(
+                f"[worker] job {job_id} downloading s3://{bucket}/{input_key} "
+                f"(receive_count={receive_count})"
+            )
+            s3.download_file(bucket, input_key, str(local_in))
+
+            t0 = now_ms()
+            result = dummy_ocr(local_in)
+            duration = now_ms() - t0
+
+            payload = {
+                "job_id": job_id,
+                "status": "DONE",
+                "duration_ms": duration,
+                "result": result,
+            }
+            local_out.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            print(f"[worker] job {job_id} uploading result s3://{bucket}/{result_key}")
+            s3.upload_file(str(local_out), bucket, result_key)
+
+            ddb_update_status(
+                job_id,
+                "DONE",
+                set_fields={
+                    "duration_ms": duration,
+                    "last_worker_id": WORKER_ID,
+                    "last_receive_count": receive_count,
+                },
+                remove_fields=[
+                    "failure_type",
+                    "error_code",
+                    "error_message",
+                    "failed_at",
+                ],
+            )
+
+            sqs.delete_message(QueueUrl=SQS_URL, ReceiptHandle=receipt)
+            print(f"[worker] job {job_id} DONE")
+
+        except Exception as e:
+            failure_type, error_code = classify_error(e)
+            error_message = f"{type(e).__name__}: {e}"
+            failed_at = now_ms()
+
+            print(
+                f"[worker] job {job_id} error "
+                f"failure_type={failure_type} error_code={error_code} msg={error_message}"
+            )
+
+            if failure_type == "PERMANENT":
+                try:
+                    ddb_update_status(
+                        job_id,
+                        "FAILED",
+                        set_fields={
+                            "failure_type": failure_type,
+                            "error_code": error_code,
+                            "error_message": error_message,
+                            "last_receive_count": receive_count,
+                            "failed_at": failed_at,
+                            "last_worker_id": WORKER_ID,
+                        },
+                    )
+                except Exception as update_err:
+                    print(f"[worker] failed to update FAILED metadata: {update_err}")
+
+                sqs.delete_message(QueueUrl=SQS_URL, ReceiptHandle=receipt)
+                print(f"[worker] job {job_id} marked FAILED and message deleted")
+
+            else:
+                try:
+                    ddb_update_status(
+                        job_id,
+                        "QUEUED",
+                        set_fields={
+                            "failure_type": failure_type,
+                            "error_code": error_code,
+                            "error_message": error_message,
+                            "last_receive_count": receive_count,
+                            "failed_at": failed_at,
+                            "last_worker_id": WORKER_ID,
+                        },
+                    )
+                except Exception as update_err:
+                    print(f"[worker] failed to revert job to QUEUED: {update_err}")
+
+                # Do NOT delete message.
+                # Let visibility timeout expire so SQS retries, and eventually DLQ handles it.
+                print(f"[worker] job {job_id} reverted to QUEUED for retry")
+
+        finally:
+            try:
+                local_in.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            try:
+                local_out.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,23 @@
+services:
+  api:
+    build: ./hybrid-ocr-api
+    ports:
+      - "8000:8000"
+    environment:
+      AWS_REGION: ap-southeast-1
+      OCR_API_KEY: ${OCR_API_KEY}
+      OCR_S3_BUCKET: ${OCR_S3_BUCKET}
+      OCR_SQS_URL: ${OCR_SQS_URL}
+      OCR_DDB_TABLE: ${OCR_DDB_TABLE}
+    volumes:
+      - ~/.aws:/root/.aws:ro
+
+  worker:
+    build: ./hybrid-ocr-worker
+    environment:
+      AWS_REGION: ap-southeast-1
+      OCR_SQS_URL: ${OCR_SQS_URL}
+      OCR_DDB_TABLE: ${OCR_DDB_TABLE}
+      OCR_TEST_MODE: ${OCR_TEST_MODE}
+    volumes:
+      - ~/.aws:/root/.aws:ro
