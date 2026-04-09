@@ -16,8 +16,8 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 
 COPY --from=builder /install /usr/local
 
-COPY aws_worker.py .
+COPY worker.py .
 
 USER appuser
 
-CMD ["python", "aws_worker.py"]
+CMD ["python", "worker.py"]
