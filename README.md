@@ -1,450 +1,220 @@
-##Hybrid OCR Infrastructure
-Production-Inspired Asynchronous Processing System (AWS)
+# DevOps Assignment
 
---------------------------------------------------------------
+Production-ready DevOps setup focusing on reliability, security, CI/CD, and observability.
 
-## Overview
+## Architecture Overview
 
-This project is a production-inspired asynchronous OCR processing system built using AWS S3, SQS, and DynamoDB.
+> See `docs/architecture.png` for the full architecture diagram.
 
-### it demonstrates:
-
-- Decoupled architecture
-- At-least-once delivery handling
-- Idempotent worker design
-- Conditional writes in DynamoDB
-- Failure-aware state transitions
-- Dockerized services
-- Local orchestration via Docker Compose
-
---------------------------------------------------------------
-
-## Architecture
-
-![Architecture](docs/architecture.png)
-
-### Architecture Flow
-
-Client
-|
-v
-Flask API
-|
-|-- Upload file -> S3
-|-- Create job (QUEUED) -> DynamoDB
-|-- Send message -> SQS
-|
-v
-Worker (poll SQS)
-|
-|-- Process OCR
-|-- Upload result -> S3
-|-- Update job (DONE / FAILED) -> DynamoDB
-|-- Delete message -> SQS
-
-### Design principles:
-
-- DynamoDB is the source of truth
-- S3 stores input and result files
-- SQS provides async decoupling
-- Worker is idempotent
-- Safe against crash scenarios
-
---------------------------------------------------------------
-
-## CI/CD Pipeline
-
-This project uses GitHub Actions for CI/CD.
-
-### CI
-
-On pull requests:
-
-- Python validation (API and Worker)
-- Docker build validation
-- Terraform validation
-
-### CD
-
-On push to `main`:
-
-1. GitHub Actions assumes an AWS IAM role using **OIDC**
-2. Builds Docker images for:
-   - `hybrid-ocr-api`
-   - `hybrid-ocr-worker`
-3. Pushes images to **Amazon ECR**
-
-### Security
-
-AWS authentication is performed using **GitHub OIDC** instead of static credentials.
-
-No AWS access keys are stored in GitHub secrets.
-
---------------------------------------------------------------
+**Components:**
+- **API Service** (2-5 replicas) — REST API with `/health` and `/metrics`
+- **Worker Service** (1 replica) — Background job, updates timestamps every 60s
+- **HPA** — Auto-scales API pods when CPU > 70%
+- **Prometheus** — Scrapes metrics, evaluates alert rules
 
 ## Tech Stack
 
-- Python 3.11
-- Flask
-- Gunicorn
-- boto3
-- AWS S3 / SQS / DynamoDB
-- Docker / Docker Compose
-
---------------------------------------------------------------
+| Component | Technology |
+|---|---|
+| Container | Docker (multi-stage builds) |
+| Orchestration | Kubernetes (Docker Desktop / EKS) |
+| CI/CD | GitHub Actions |
+| Monitoring | Prometheus + structured JSON logs |
+| Registry | AWS ECR |
+| Language | Python (Flask + background worker) |
 
 ## Project Structure
 
-hybrid-ocr/
+```
+devops-assignment/
+├── api/                    # Flask API service
+│   ├── app.py
+│   ├── Dockerfile
+│   └── requirements.txt
+├── worker/                 # Background worker service
+│   ├── worker.py
+│   ├── Dockerfile
+│   └── requirements.txt
+├── k8s/
+│   ├── base/               # Base K8s manifests
+│   │   ├── namespace.yaml
+│   │   ├── configmap.yaml
+│   │   ├── secret.yaml
+│   │   ├── api-deployment.yaml
+│   │   ├── api-service.yaml
+│   │   ├── api-hpa.yaml
+│   │   └── worker-deployment.yaml
+│   └── overlays/           # Environment-specific configs
+│       ├── dev/
+│       ├── uat/
+│       └── prod/
+├── monitoring/
+│   ├── prometheus/
+│   │   └── prometheus.yml
+│   └── alerts/
+│       └── alerts.yml
+└── .github/
+    └── workflows/
+        ├── ci.yml
+        └── cd.yml
+```
 
-|-- hybrid-ocr-api/  
-|   |-- app.py  
-|   |-- Dockerfile  
-|   |-- requirements.txt  
+## Setup Instructions
 
-|-- hybrid-ocr-worker/  
-|   |-- aws_worker.py  
-|   |-- Dockerfile  
-|   |-- requirements.txt  
+### Prerequisites
+- Docker Desktop with Kubernetes enabled
+- kubectl
+- AWS CLI (for ECR)
 
-|-- docs/  
-|   |-- architecture.png  
-|   |-- dashboard.png  
-|   |-- alarms.png  
+### Local Development
 
-|-- docker-compose.yml  
-|-- .env.example  
-|-- README.md  
+```bash
+# Clone repo
+git clone https://github.com/anurinth-w/devops-assignment.git
+cd devops-assignment
 
---------------------------------------------------------------
+# Run locally with Docker Compose
+docker-compose up
+```
 
-## Environment Variables
+### Deploy to Kubernetes
 
-### Create a `.env` file
+```bash
+# Deploy to dev
+kubectl apply -k k8s/overlays/dev/
 
-OCR_API_KEY=changeme
-OCR_S3_BUCKET=your-bucket
-OCR_SQS_URL=your-sqs-url
-OCR_DDB_TABLE=your-ddb-table
-AWS_REGION=ap-southeast-1
+# Deploy to uat
+kubectl apply -k k8s/overlays/uat/
 
---------------------------------------------------------------
+# Deploy to prod
+kubectl apply -k k8s/overlays/prod/
 
-## Running Locally
+# Check status
+kubectl get all -n devops-assignment
+```
 
-### bash
+### Environment Variables
 
-docker compose up --build
+| Variable | Description | Required |
+|---|---|---|
+| `OCR_API_KEY` | API authentication key | Yes |
+| `OCR_S3_BUCKET` | S3 bucket for file storage | Yes |
+| `OCR_SQS_URL` | SQS queue URL | Yes |
+| `OCR_DDB_TABLE` | DynamoDB table name | Yes |
+| `AWS_REGION` | AWS region | Yes |
+| `WORKER_INTERVAL_SECONDS` | Worker run interval (default: 60) | No |
 
-### API
+## Usage Instructions
 
-http://localhost:8000
+### API Endpoints
 
-### Health check
-
+```bash
+# Health check
 curl http://localhost:8000/health
 
---------------------------------------------------------------
+# Prometheus metrics
+curl http://localhost:8000/metrics
 
-## API Endpoints
+# Create job (requires API key)
+curl -X POST http://localhost:8000/jobs \
+  -H "x-api-key: your-api-key" \
+  -F "file=@document.pdf"
 
-### Create Job
+# Get job status
+curl http://localhost:8000/jobs/<job_id> \
+  -H "x-api-key: your-api-key"
+```
 
-POST /jobs
+### Port Forward (local K8s)
 
-### Header
+```bash
+kubectl port-forward svc/api 8000:80 -n devops-assignment
+```
 
-x-api-key: <OCR_API_KEY>
+## CI/CD Pipeline
 
-### Content-Type
+### CI (on push/PR to main)
+1. **python** — Install dependencies, compile Python files
+2. **docker** — Build API and Worker images
+3. **validate-k8s** — Validate K8s manifests with kubeval
 
-multipart/form-data
+### CD (on push to main)
+1. **build-and-push** — Build images, push to AWS ECR
+2. **deploy** — Deploy to EKS (disabled until cluster provisioned)
 
-### Field
+### Required GitHub Secrets
 
-file
+| Secret | Description |
+|---|---|
+| `AWS_GITHUB_ACTIONS_ROLE_ARN` | IAM Role ARN for OIDC authentication |
+| `EKS_CLUSTER_NAME` | EKS cluster name (for deploy step) |
 
-### Response
+## Failure Scenarios
 
+### 1. API crashes during peak hours
+- K8s restarts pod automatically via liveness probe
+- HPA scales up replicas when CPU > 70%
+- Readiness probe prevents traffic to unhealthy pods
+- Alert: `HighErrorRate` triggers if error rate > 10% for 2 minutes
+
+### 2. Worker fails and infinitely retries
+- Liveness probe detects stalled worker and restarts pod
+- K8s `restartPolicy: Always` ensures worker comes back
+- Alert: `WorkerCrashLooping` triggers after repeated restarts
+- Fix: `kubectl logs -n devops-assignment deployment/worker`
+
+### 3. Bad deployment is released
+- Roll back: `kubectl rollout undo deployment/api -n devops-assignment`
+- Check status: `kubectl rollout status deployment/api -n devops-assignment`
+- CI pipeline catches issues early via build + validate steps
+
+### 4. Kubernetes node goes down
+- API: min 2 replicas, pods reschedule to healthy nodes automatically
+- Worker: reschedules to healthy node, resumes from next interval
+- Note: Single-node (Docker Desktop) cannot reschedule — production should use multi-node EKS
+
+## Monitoring
+
+### Structured Logs
+
+Both API and Worker output structured JSON logs:
+
+```json
 {
-"job_id": "...",
-"status": "QUEUED"
+  "event": "timestamp_update_done",
+  "ts": 1775755543562,
+  "worker_id": "worker-54b7c8f998-dwn64",
+  "today": "2026-04-09",
+  "updated_count": 6,
+  "skipped_count": 4
 }
-
---------------------------------------------------------------
-
-## Get Job Status
-
-GET /jobs/<job_id>
-
-### states
-
-- QUEUED
-- PROCESSING
-- DONE
-- FAILED
-
-If DONE → returns presigned S3 URL
-
---------------------------------------------------------------
-
-## Failure Handling
-
-### Handles
-
-- At-least-once delivery (SQS Standard)
-- Worker crash before delete_message
-- Crash after upload but before DDB update
-- Duplicate message processing
-
-### Mechanism
-
-- Idempotent worker
-- DynamoDB conditional writes
-- Safe state transitions
-
---------------------------------------------------------------
-
-## Chaos Testing (Failure Scenarios)
-
-See detailed timeline and results:
-[Chaos Test Report](https://docs.google.com/spreadsheets/d/1HH7SjYduQlUfoU6T7efCPeReIEOZ0tc4gKgFm3OhTz8/edit?usp=sharing)
-
-Tested scenarios:
-
--Worker crash
--Transient failure (retry)
--Permanent failure
--Dead Letter Queue (DLQ)
-
-Results:
-
--Transient errors are retried and eventually succeed
--Permanent errors are marked FAILED (no retry)
--Messages exceeding retry limit go to DLQ
--No data loss observed during failures
-
---------------------------------------------------------------
-
-## Failure Behavior Summary
-
-The system was designed to handle real-world distributed system failures:
-
-- Worker crashes do not result in data loss
-- Messages may be delivered multiple times (SQS Standard)
-- Idempotent processing ensures safe re-execution
-- Transient failures are retried automatically
-- Permanent failures are not retried
-- Poison messages are isolated via DLQ
-
---------------------------------------------------------------
-
-## Observability
-
-### CloudWatch Dashboard
-
-This dashboard was used during chaos testing to observe system behavior under failure scenarios.
-
-It shows queue backlog growth, retry patterns, and DLQ behavior.
-
-![Dashboard](docs/dashboard2.png)
-
-- Queue depth increases when worker is unavailable
-- DLQ messages appear after retry exhaustion
-- Job failures split into transient vs permanent
-
-## Metrics (CloudWatch)
-
-The system exposes custom metrics to monitor job processing, system health, and queue behavior.
-
-### Job Metrics
-
-- JobsCreated  
-  Total number of jobs submitted to the system.
-
-- JobsProcessed  
-  Number of successfully completed jobs.
-
-- JobFailures  
-  Total number of failed jobs.
-
-- JobsFailedTransient  
-  Number of transient failures (retried automatically).
-
-- JobsFailedPermanent  
-  Number of permanent failures (not retried).
-
----
-
-### Latency Metrics
-
-- QueueDelayMs  
-  Time spent in queue before a worker starts processing the job.
-
-- ProcessingLatencyMs  
-  Time taken by the worker to process the job.
-
-- EndToEndLatencyMs  
-  Total time from job creation to completion.
-
----
-
-### Queue Metrics (SQS)
-
-- QueueDepth  
-  Approximate number of messages waiting in the queue  
-  (ApproximateNumberOfMessagesVisible)
-
-- QueueAge  
-  Age of the oldest message in the queue  
-  (ApproximateAgeOfOldestMessage)
-
-- DLQMessages  
-  Number of messages in the Dead Letter Queue
-
----
-
-### Worker Metrics
-
-- WorkerHeartbeat  
-  Indicates worker liveness (emitted periodically)
-
-- CPUUsagePercent  
-  CPU usage of the worker instance/container
-
-- MemoryUsagePercent  
-  Memory usage of the worker
-
-- GPUUsagePercent (optional)  
-  GPU utilization (if GPU is enabled)
-
----
-
-### Failure & Retry Behavior
-
-- ReceiveCount  
-  Number of times a message has been received from SQS
-
-- RetryCount  
-  Number of retries before success or failure
-
-- TimeToRecoveryMs  
-  Time from first failure to successful completion
-
-- TimeToDLQMs  
-  Time taken for a message to move to DLQ after repeated failures
-
----
-
-### Why These Metrics Matter
-
-- Detect backlog growth (QueueDepth, QueueAge)
-- Identify slow processing (Latency metrics)
-- Monitor system reliability (Failures, DLQ)
-- Ensure worker health (Heartbeat, CPU/Memory)
-- Validate retry behavior (RetryCount, ReceiveCount)
-
---------------------------------------------------------------
-
-## CloudWatch Alarms
-
-![Alarms](docs/alarms.png)
-
-Configured alarms:
-
-HybridOCR-JobsFailed-High
-
-Triggers when job failures exceed a safe threshold.
-
-HybridOCR-QueueDepth-High
-
-Triggers when the queue grows beyond a defined limit.
-
-HybridOCR-DLQ-HasMessages
-
-Triggers when messages appear in the Dead Letter Queue.
-
-These alarms help detect operational issues early.
-
---------------------------------------------------------------
-
-## Runbook
-
-Operational checks for common issues.
-
-If jobs are not processing
-
-Check queue depth:
-
-CloudWatch → SQS → ApproximateNumberOfMessagesVisible
-
-If the queue keeps increasing, the worker may not be processing jobs.
-
-Check worker logs:
-
-CloudWatch → Logs
-
-Look for events such as:
-
-job_claimed  
-job_processing_started  
-job_done  
-job_failed  
-
---------------------------------------------------------------
-
-If jobs are failing
-
-Check the JobFailures metric in CloudWatch.
-
-Steps:
-
-1. Inspect worker logs.
-2. Identify error_code values.
-3. Verify input files exist in S3.
-4. Check DynamoDB job state.
-
-Permanent failures should set job status to FAILED.
-
---------------------------------------------------------------
-
-### If messages appear in DLQ
-
-Check the DLQ queue.
-
-Steps:
-
-1. Inspect the failed message.
-2. Review worker logs around the failure timestamp.
-3. Identify the root cause.
-4. Reprocess the job if appropriate.
-
---------------------------------------------------------------
-
-## Engineering Concepts Demonstrated
-
-- Async processing
-- Message-driven architecture
-- Idempotency
-- Failure handling (retry + DLQ)
-- Visibility timeout behavior
-- Observability (metrics + alarms)
-
---------------------------------------------------------------
-
-## What This Project Demonstrates
-
-This project demonstrates the ability to design and operate a production-style asynchronous system with:
-
-- Failure handling
-- Retry logic
-- Observability
-- Cloud-native architecture
-
---------------------------------------------------------------
-
-## Author
-
-### Anurinth Wichairum
-
-Cloud / DevOps Engineer (Aspiring)
+```
+
+### Metrics (Prometheus)
+
+| Metric | Description |
+|---|---|
+| `flask_http_request_total` | Request count by status code |
+| `flask_http_request_duration_seconds` | Request latency |
+| `app_info` | Service version info |
+
+### Alerts
+
+| Alert | Condition | Severity |
+|---|---|---|
+| `HighErrorRate` | Error rate > 10% for 2m | Critical |
+| `APIDown` | API unreachable for 1m | Critical |
+| `WorkerCrashLooping` | Worker restarts repeatedly | Warning |
+
+## Assumptions & Decisions
+
+| Decision | Reasoning |
+|---|---|
+| Docker Desktop K8s for local | Free, fast setup, manifests work on EKS with context switch |
+| Kubeadm over kind | Simpler setup, no extra dependencies |
+| Worker uses in-memory store | Assignment allows stubbed logic, avoids AWS dependency for local dev |
+| Worker as Deployment not CronJob | Assignment specifies "background service worker" implying long-running |
+| ClusterIP for API Service | API accessed via port-forward or ingress, not directly exposed |
+| HPA min=2 for API | Ensures HA, single pod = single point of failure |
+| kubeval over kubectl dry-run | dry-run requires live cluster, kubeval validates schema without cluster |
+| Prometheus over CloudWatch | K8s ecosystem standard, cloud-agnostic, open source |
