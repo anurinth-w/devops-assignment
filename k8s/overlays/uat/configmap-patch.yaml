@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: devops-assignment
+data:
+  AWS_REGION: "ap-southeast-1"
+  OCR_DDB_TABLE: "hybrid-ocr-jobs-uat"
+  WORKER_INTERVAL_SECONDS: "60"
+  WORKER_SEED_RECORDS: "10"
+  ENV: "uat"

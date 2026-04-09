@@ -17,3 +17,5 @@ patches:
     target:
       kind: HorizontalPodAutoscaler
       name: api-hpa
+resources:
+  - configmap-patch.yaml
