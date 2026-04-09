@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [hybrid-ocr-api, hybrid-ocr-worker]
+        service: [api, worker]
 
     steps:
       - name: Checkout repository
@@ -45,29 +45,20 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build API image
-        run: docker build -t hybrid-ocr-api:ci ./hybrid-ocr-api
+        run: docker build -t devops-api:ci ./api
 
       - name: Build Worker image
-        run: docker build -t hybrid-ocr-worker:ci ./hybrid-ocr-worker
+        run: docker build -t devops-worker:ci ./worker
 
-  terraform:
+  validate-k8s:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra/environments/dev
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
 
-      - name: Terraform fmt check
-        run: terraform fmt -check -recursive ../..
-
-      - name: Terraform init
-        run: terraform init -backend=false
-
-      - name: Terraform validate
-        run: terraform validate
+      - name: Validate K8s manifests
+        run: kubectl apply --dry-run=client -k k8s/base/
