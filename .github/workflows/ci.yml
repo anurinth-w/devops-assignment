@@ -57,8 +57,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
+      - name: Install kubeval
+        run: |
+          curl -sL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
+          sudo mv kubeval /usr/local/bin
 
       - name: Validate K8s manifests
-        run: kubectl apply --dry-run=client --validate=false -k k8s/base/
+        run: |
+          find k8s/base -name "*.yaml" | xargs kubeval --ignore-missing-schemas
