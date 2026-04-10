@@ -4,7 +4,7 @@ Production-ready DevOps setup focusing on reliability, security, CI/CD, and obse
 
 ## Architecture Overview
 
-> See `docs/architecture.png` for the full architecture diagram.
+![Architecture Diagram](docs/architecture.png)
 
 **Components:**
 - **API Service** (2-5 replicas) — REST API with `/health` and `/metrics`
