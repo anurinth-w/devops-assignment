@@ -50,6 +50,36 @@ jobs:
       - name: Build Worker image
         run: docker build -t devops-worker:ci ./worker
 
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: docker
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build API image for scanning
+        run: docker build -t devops-api:ci ./api
+
+      - name: Scan API image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: devops-api:ci
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 0
+
+      - name: Build Worker image for scanning
+        run: docker build -t devops-worker:ci ./worker
+
+      - name: Scan Worker image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: devops-worker:ci
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 0
+
   validate-k8s:
     runs-on: ubuntu-latest
 
