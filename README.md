@@ -73,8 +73,19 @@ devops-assignment/
 git clone https://github.com/anurinth-w/devops-assignment.git
 cd devops-assignment
 
-# Run locally with Docker Compose
-docker-compose up
+# Run API locally
+docker run --rm -p 8000:8000 \
+  -e OCR_API_KEY=testkey \
+  -e AWS_REGION=ap-southeast-1 \
+  -e OCR_S3_BUCKET=test \
+  -e OCR_SQS_URL=test \
+  -e OCR_DDB_TABLE=test \
+  devops-api:test
+
+# Run Worker locally
+docker run --rm \
+  -e WORKER_INTERVAL_SECONDS=10 \
+  devops-worker:test
 ```
 
 ### Deploy to Kubernetes
@@ -134,13 +145,27 @@ kubectl port-forward svc/api 8000:80 -n devops-assignment
 ## CI/CD Pipeline
 
 ### CI (on push/PR to main)
-1. **python** — Install dependencies, compile Python files
-2. **docker** — Build API and Worker images
-3. **validate-k8s** — Validate K8s manifests with kubeval
+
+| Job | Description | Status |
+|---|---|---|
+| `python` | Install dependencies, compile Python files | ✅ Implemented |
+| `docker` | Build API and Worker images | ✅ Implemented |
+| `security-scan` | Scan images with Trivy (HIGH/CRITICAL) | ✅ Implemented |
+| `validate-k8s` | Validate K8s manifests with kubeval | ✅ Implemented |
+
+> Kubernetes manifests are validated using kubeval instead of applying to a live cluster.
+> kubeval validates schema without requiring a running cluster, making it CI-friendly.
 
 ### CD (on push to main)
-1. **build-and-push** — Build images, push to AWS ECR
-2. **deploy** — Deploy to EKS (disabled until cluster provisioned)
+
+| Job | Description | Status |
+|---|---|---|
+| `build-and-push` | Build images, push to AWS ECR | ✅ Implemented |
+| `deploy` | Deploy to EKS | 🚧 Designed (disabled) |
+
+> The EKS deployment step is included but disabled (`if: false`) since no real EKS cluster
+> is provisioned for this assignment. The step is ready for activation by removing `if: false`
+> and configuring the `EKS_CLUSTER_NAME` secret.
 
 ### Required GitHub Secrets
 
@@ -175,9 +200,9 @@ kubectl port-forward svc/api 8000:80 -n devops-assignment
 
 ## Monitoring
 
-### Structured Logs
+### ✅ Implemented
 
-Both API and Worker output structured JSON logs:
+**Structured Logs** — Both API and Worker output structured JSON logs:
 
 ```json
 {
@@ -190,21 +215,48 @@ Both API and Worker output structured JSON logs:
 }
 ```
 
-### Metrics (Prometheus)
+**Metrics endpoint** — API exposes `/metrics` via `prometheus-flask-exporter`:
 
 | Metric | Description |
 |---|---|
-| `flask_http_request_total` | Request count by status code |
-| `flask_http_request_duration_seconds` | Request latency |
+| `flask_http_request_total` | Request count by method and status code |
+| `flask_http_request_duration_seconds` | Request latency histogram |
 | `app_info` | Service version info |
 
-### Alerts
+Tested locally:
+```bash
+curl http://localhost:8000/metrics
+# flask_http_request_total{method="GET",status="401"} 1.0
+```
+
+### 🚧 Designed (Not executed)
+
+**Prometheus scraping** — Config available at `monitoring/prometheus/prometheus.yml`.
+Requires Prometheus deployment in cluster to activate. Ready for integration.
+
+**Alert rules** — Defined in `monitoring/alerts/alerts.yml`:
 
 | Alert | Condition | Severity |
 |---|---|---|
 | `HighErrorRate` | Error rate > 10% for 2m | Critical |
 | `APIDown` | API unreachable for 1m | Critical |
 | `WorkerCrashLooping` | Worker restarts repeatedly | Warning |
+
+Requires Prometheus deployment to load and evaluate rules.
+
+## Security
+
+### ✅ Implemented
+
+- **Non-root container** — Both API and Worker run as `appuser` (non-root)
+- **Multi-stage builds** — Build tools excluded from runtime image
+- **Secret separation** — Sensitive config stored in K8s Secret, not ConfigMap
+- **OIDC authentication** — GitHub Actions uses IAM Role via OIDC, no static credentials
+- **Trivy security scan** — CI scans images for HIGH/CRITICAL vulnerabilities
+
+**Trivy scan results (API image):**
+- CRITICAL: 0
+- HIGH: 11 (all from base image `python:3.11-slim` and indirect dependencies, not application code)
 
 ## Assumptions & Decisions
 
@@ -218,3 +270,5 @@ Both API and Worker output structured JSON logs:
 | HPA min=2 for API | Ensures HA, single pod = single point of failure |
 | kubeval over kubectl dry-run | dry-run requires live cluster, kubeval validates schema without cluster |
 | Prometheus over CloudWatch | K8s ecosystem standard, cloud-agnostic, open source |
+| Trivy exit-code=0 | Vulnerabilities are in base image outside our control, blocking CI would be counterproductive |
+| Push directly to main | Single developer, time-constrained assignment. Production should use feature branches + PR review |
